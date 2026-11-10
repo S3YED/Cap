@@ -1,0 +1,66 @@
+name: scratch ns turbo loop
+
+# Scratch only (never merge): loops cap-verify's export `turbo` test on Linux
+# and counts glibc heap-corruption aborts, to compare main with a PR head.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        type: number
+        default: 40
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  CAP_VERIFY_CARGO_PROFILE: ci-verify
+  CAP_VERIFY_NEXTEST_PROFILE: ci
+  CAP_VERIFY_LOCKED: "1"
+  CAP_VERIFY_REQUIRE_SUPPORTED: "1"
+  CAP_VERIFY_HOST: blacksmith
+
+jobs:
+  loop:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup
+        uses: ./.github/actions/engine-verify-setup
+        with:
+          target: x86_64-unknown-linux-gnu
+          tier: full
+
+      - name: Build
+        shell: bash
+        run: scripts/verify/run.sh full --suites export --no-run
+
+      - name: Loop turbo export
+        shell: bash
+        run: |
+          fails=0
+          aborts=0
+          for i in $(seq 1 ${{ inputs.iterations }}); do
+            log="$RUNNER_TEMP/iter-$i.log"
+            if ! scripts/verify/run.sh full --suites export -- -E 'test(turbo)' >"$log" 2>&1; then
+              fails=$((fails + 1))
+            fi
+            if grep -q -E "SIGABRT|SIGSEGV|tcache|malloc\(\)|double free|corrupted|free\(\): invalid" "$log"; then
+              aborts=$((aborts + 1))
+              echo "::warning::iteration $i aborted"
+              grep -E "SIGABRT|SIGSEGV|tcache|malloc|double free|corrupted|free\(\)|\[cap-verify\] case" "$log" | head -12
+            fi
+          done
+          echo "RESULT lane=${{ matrix.lane }} iterations=${{ inputs.iterations }} fails=$fails aborts=$aborts sha=$GITHUB_SHA"
+          echo "RESULT lane=${{ matrix.lane }} iterations=${{ inputs.iterations }} fails=$fails aborts=$aborts" >> "$GITHUB_STEP_SUMMARY"
